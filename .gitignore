@@ -1,0 +1,31 @@
+# Python
+webapp/.venv/
+__pycache__/
+*.py[cod]
+
+# Secrets and local environment
+.env
+*.env
+
+# Model and generated runtime files
+webapp/best.pt
+webapp/static/uploads/*
+webapp/static/results/*
+
+# KaggleHub and local caches
+.kaggle/
+.kagglehub/
+
+# Flutter/Dart generated files
+mobile_flutter/.dart_tool/
+mobile_flutter/build/
+mobile_flutter/.flutter-plugins
+mobile_flutter/.flutter-plugins-dependencies
+mobile_flutter/.packages
+mobile_flutter/pubspec.lock
+
+# IDE and OS files
+.vscode/*.log
+.idea/
+.DS_Store
+Thumbs.db

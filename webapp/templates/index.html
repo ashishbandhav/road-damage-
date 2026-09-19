@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#1c1e22">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="RoadScan">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<title>RoadScan AI — Detector</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap');
+  :root{
+    --bg:#1c1e22; --panel:#232529; --cone:#ff5a1f; --caution:#f5b400;
+    --text:#f2f0e8; --muted:#8b8f96; --border:#2c2e33;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);}
+  .marking-strip{height:6px;background:repeating-linear-gradient(90deg, var(--caution) 0 40px, transparent 40px 70px);}
+  header{padding:24px 40px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;}
+  .logo{display:flex;align-items:center;gap:10px;color:var(--text);text-decoration:none;}
+  .logo-mark{width:26px;height:26px;background:var(--cone);clip-path:polygon(50% 0%,0% 100%,100% 100%);}
+  .logo-text{font-family:'Barlow Condensed';font-weight:800;font-size:1.2rem;letter-spacing:.05em;text-transform:uppercase;}
+  header a.back{color:var(--muted);text-decoration:none;font-size:.85rem;}
+  header a.back:hover{color:var(--text);}
+  header p{margin:4px 0 0;color:var(--muted);font-size:.9rem}
+  .wrap{max-width:1000px;margin:40px auto;padding:0 20px;}
+  h2.page-title{font-family:'Barlow Condensed';font-size:2.2rem;text-transform:uppercase;font-weight:800;margin-bottom:6px;}
+  .subtitle{color:var(--muted);margin-bottom:28px;font-size:.95rem;}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:24px;margin-bottom:24px;}
+  .dropzone{border:2px dashed var(--border);border-radius:6px;padding:40px;text-align:center;cursor:pointer;transition:.2s;}
+  .dropzone:hover{border-color:var(--cone);}
+  .dropzone.drag{border-color:var(--caution);background:#1a1b1e;}
+  button{background:var(--cone);color:#1c1e22;border:none;padding:12px 26px;border-radius:4px;font-weight:700;cursor:pointer;font-size:.9rem;text-transform:uppercase;letter-spacing:.03em;}
+  button:hover{background:var(--caution);}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .result-img{max-width:100%;border-radius:6px;margin-top:16px;border:1px solid var(--border)}
+  table{width:100%;border-collapse:collapse;margin-top:16px;}
+  th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:.9rem}
+  th{color:var(--muted);font-weight:600;font-family:'JetBrains Mono';font-size:.75rem;text-transform:uppercase;}
+  .sev-High{color:#e6432f;font-weight:600}
+  .sev-Medium{color:var(--caution);font-weight:600}
+  .sev-Low{color:#5fbf8f;font-weight:600}
+  #status{color:var(--muted);margin-top:10px;font-size:.9rem;font-family:'JetBrains Mono';}
+  .install-banner{
+    display:none; align-items:center; justify-content:space-between; gap:12px;
+    background:var(--cone); color:#1c1e22; padding:12px 18px; border-radius:6px;
+    margin-bottom:20px; font-size:.85rem; font-weight:600;
+  }
+  .install-banner button{background:#1c1e22; color:#fff; padding:8px 16px; font-size:.8rem;}
+</style>
+</head>
+<body>
+<div class="marking-strip"></div>
+<header>
+  <a class="logo" href="/" aria-label="RoadScan AI home"><div class="logo-mark"></div><span class="logo-text">RoadScan AI</span></a>
+  <a href="/" class="back">← Back to site</a>
+</header>
+
+<div class="wrap">
+  <div class="install-banner" id="installBanner">
+    <span>📲 Install RoadScan as an app on this device</span>
+    <button id="installBtn">Install</button>
+  </div>
+  <h2 class="page-title">Damage Detector</h2>
+  <p class="subtitle">Upload a road photo — the model marks cracks and potholes with a severity score.</p>
+  <div class="panel">
+    <div class="dropzone" id="dropzone">
+      <p>Drag & drop a road image here, or click to select</p>
+      <input type="file" id="fileInput" accept="image/*" hidden>
+    </div>
+    <div style="margin-top:14px;">
+      <button id="detectBtn" disabled>Run Detection</button>
+      <span id="status"></span>
+    </div>
+  </div>
+
+  <div class="panel" id="resultsPanel" style="display:none;">
+    <h3 style="margin-top:0">Detection Results</h3>
+    <img id="resultImg" class="result-img">
+    <table id="resultsTable">
+      <thead><tr><th>Type</th><th>Confidence</th><th>Severity</th></tr></thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const detectBtn = document.getElementById('detectBtn');
+const status = document.getElementById('status');
+let selectedFile = null;
+
+dropzone.onclick = () => fileInput.click();
+dropzone.ondragover = e => { e.preventDefault(); dropzone.classList.add('drag'); };
+dropzone.ondragleave = () => dropzone.classList.remove('drag');
+dropzone.ondrop = e => {
+  e.preventDefault(); dropzone.classList.remove('drag');
+  handleFile(e.dataTransfer.files[0]);
+};
+fileInput.onchange = e => handleFile(e.target.files[0]);
+
+function handleFile(file){
+  if(!file) return;
+  selectedFile = file;
+  dropzone.querySelector('p').textContent = `Selected: ${file.name}`;
+  detectBtn.disabled = false;
+}
+
+detectBtn.onclick = async () => {
+  if(!selectedFile) return;
+  status.textContent = 'Running detection...';
+  detectBtn.disabled = true;
+  const formData = new FormData();
+  formData.append('image', selectedFile);
+
+  try{
+    const res = await fetch('/detect', { method:'POST', body: formData });
+    const data = await res.json();
+    if(data.error){ status.textContent = 'Error: ' + data.error; detectBtn.disabled = false; return; }
+
+    document.getElementById('resultsPanel').style.display = 'block';
+    document.getElementById('resultImg').src = data.result_image + '?t=' + Date.now();
+
+    const body = document.getElementById('resultsBody');
+    body.innerHTML = '';
+    if(data.count === 0){
+      body.innerHTML = '<tr><td colspan="3">No damage detected.</td></tr>';
+    } else {
+      data.detections.forEach(d => {
+        body.innerHTML += `<tr><td>${d.class}</td><td>${(d.confidence*100).toFixed(0)}%</td><td class="sev-${d.severity}">${d.severity}</td></tr>`;
+      });
+    }
+    status.textContent = `Found ${data.count} damage instance(s).`;
+  }catch(err){
+    status.textContent = 'Request failed: ' + err;
+  }
+  detectBtn.disabled = false;
+};
+
+// --- PWA: register service worker + handle install prompt ---
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+}
+
+let deferredPrompt;
+const installBanner = document.getElementById('installBanner');
+const installBtn = document.getElementById('installBtn');
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  installBanner.style.display = 'flex'; // Android/Chrome
+});
+
+installBtn.onclick = async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  await deferredPrompt.userChoice;
+  deferredPrompt = null;
+  installBanner.style.display = 'none';
+};
+
+// iOS Safari has no beforeinstallprompt — show manual instructions instead
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+if (isIOS && !isStandalone) {
+  installBanner.style.display = 'flex';
+  installBanner.querySelector('span').textContent = '📲 Tap Share → "Add to Home Screen" to install';
+  installBtn.style.display = 'none';
+}
+</script>
+</body>
+</html>
