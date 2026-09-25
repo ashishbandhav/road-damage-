@@ -2,6 +2,7 @@ services:
   - type: web
     name: roadscan-ai
     runtime: python
+    plan: free
     rootDir: webapp
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
@@ -9,3 +10,11 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
