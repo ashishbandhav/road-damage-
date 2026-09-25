@@ -1,4 +1,5 @@
 import os
+import io
 import tempfile
 import unittest
 import uuid
@@ -67,6 +68,18 @@ class AuthenticationTests(unittest.TestCase):
             "/api/auth/register", json={"email": "bad@example.test", "password": "short"}
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_oversized_detector_upload_returns_json_error(self):
+        response = self.create_account(f"large-{uuid.uuid4().hex}@example.test")
+        token = response.get_json()["access_token"]
+        upload = self.client.post(
+            "/detect",
+            data={"image": (io.BytesIO(bytes(12 * 1024 * 1024 + 1)), "large.jpg")},
+            headers={"Authorization": f"Bearer {token}"},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(upload.status_code, 413)
+        self.assertEqual(upload.get_json()["error"], "Image is too large. Upload an image smaller than 12 MB.")
 
     def test_browser_registration_session_and_logout(self):
         email = f"browser-{uuid.uuid4().hex}@example.test"

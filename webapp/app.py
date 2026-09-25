@@ -22,6 +22,7 @@ from contextlib import contextmanager
 import hashlib, json, secrets, sqlite3
 from werkzeug.utils import secure_filename
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.exceptions import RequestEntityTooLarge
 import csv, os, uuid, cv2
 import xml.etree.ElementTree as ET
 
@@ -31,6 +32,7 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "").lower() == "true",
+    MAX_CONTENT_LENGTH=12 * 1024 * 1024,
 )
 UPLOAD_DIR = "static/uploads"
 RESULT_DIR = "static/results"
@@ -501,70 +503,87 @@ def kaggle_image(split, filename):
 @app.route("/detect", methods=["POST"])
 @login_required
 def detect():
-    if "image" not in request.files:
-        return jsonify({"error": "No image uploaded"}), 400
-
-    file = request.files["image"]
-    original_name = secure_filename(file.filename or "")
     fname = f"{uuid.uuid4().hex}.jpg"
     in_path = os.path.join(UPLOAD_DIR, fname)
-    file.save(in_path)
+    try:
+        if "image" not in request.files:
+            return jsonify({"error": "No image uploaded"}), 400
 
-    img = cv2.imread(in_path)
-    if img is None:
-        return jsonify({"error": "Unable to read uploaded image"}), 400
+        file = request.files["image"]
+        original_name = secure_filename(file.filename or "")
+        file.save(in_path)
 
-    h, w = img.shape[:2]
-    detections = []
+        img = cv2.imread(in_path)
+        if img is None:
+            return jsonify({"error": "Unable to read uploaded image"}), 400
 
-    detection_mode = "model"
-    if model is None:
-        annotated_detections = kaggle_annotation_detections(original_name, w, h)
-        detection_mode = "kaggle_annotations" if annotated_detections is not None else "no_model"
-        for detection in annotated_detections or []:
-            x1, y1, x2, y2 = detection["bbox"]
-            cls_name = detection["class"]
-            conf = detection["confidence"]
-            sev = detection["severity"]
-            color = SEVERITY_COLORS[sev]
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-            label = f"{cls_name} {conf:.2f} [{sev}]"
-            cv2.putText(img, label, (x1, max(y1 - 8, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-            detections.append(detection)
-    else:
-        results = model.predict(source=in_path, conf=0.35, verbose=False)[0]
-        for box in results.boxes:
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            cls_name = results.names[int(box.cls[0])]
-            conf = float(box.conf[0])
-            area_pct = ((x2 - x1) * (y2 - y1)) / (w * h) * 100
-            sev = severity_from_area(area_pct)
-            color = SEVERITY_COLORS[sev]
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-            label = f"{cls_name} {conf:.2f} [{sev}]"
-            cv2.putText(img, label, (x1, max(y1 - 8, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            detections.append({
-                "class": cls_name, "confidence": round(conf, 2),
-                "severity": sev, "bbox": [x1, y1, x2, y2]
-            })
+        h, w = img.shape[:2]
+        detections = []
 
-    out_name = f"result_{fname}"
-    out_path = os.path.join(RESULT_DIR, out_name)
-    cv2.imwrite(out_path, img)
-    add_incident_updates(detections)
-    record_activity(g.user, "detection_completed", {
-        "count": len(detections),
-        "classes": sorted({item["class"] for item in detections}),
-        "mode": detection_mode,
-    })
+        detection_mode = "model"
+        if model is None:
+            annotated_detections = kaggle_annotation_detections(original_name, w, h)
+            detection_mode = "kaggle_annotations" if annotated_detections is not None else "no_model"
+            for detection in annotated_detections or []:
+                x1, y1, x2, y2 = detection["bbox"]
+                cls_name = detection["class"]
+                conf = detection["confidence"]
+                sev = detection["severity"]
+                color = SEVERITY_COLORS[sev]
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                label = f"{cls_name} {conf:.2f} [{sev}]"
+                cv2.putText(img, label, (x1, max(y1 - 8, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+                detections.append(detection)
+        else:
+            results = model.predict(source=in_path, conf=0.35, verbose=False)[0]
+            for box in results.boxes:
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                cls_name = results.names[int(box.cls[0])]
+                conf = float(box.conf[0])
+                area_pct = ((x2 - x1) * (y2 - y1)) / (w * h) * 100
+                sev = severity_from_area(area_pct)
+                color = SEVERITY_COLORS[sev]
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                label = f"{cls_name} {conf:.2f} [{sev}]"
+                cv2.putText(img, label, (x1, max(y1 - 8, 15)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                detections.append({
+                    "class": cls_name, "confidence": round(conf, 2),
+                    "severity": sev, "bbox": [x1, y1, x2, y2]
+                })
 
-    return jsonify({
-        "detections": detections,
-        "count": len(detections),
-        "mode": detection_mode,
-        "message": "Exact Kaggle XML annotations used." if detection_mode == "kaggle_annotations" else "No trained model is installed; no pothole size was fabricated." if detection_mode == "no_model" else "YOLO model detections used.",
-        "result_image": f"/{out_path}"
-    })
+        out_name = f"result_{fname}"
+        out_path = os.path.join(RESULT_DIR, out_name)
+        if not cv2.imwrite(out_path, img):
+            raise OSError("Could not save the annotated result image")
+        add_incident_updates(detections)
+        record_activity(g.user, "detection_completed", {
+            "count": len(detections),
+            "classes": sorted({item["class"] for item in detections}),
+            "mode": detection_mode,
+        })
+
+        return jsonify({
+            "detections": detections,
+            "count": len(detections),
+            "mode": detection_mode,
+            "message": "Exact Kaggle XML annotations used." if detection_mode == "kaggle_annotations" else "No trained model is installed; no pothole size was fabricated." if detection_mode == "no_model" else "YOLO model detections used.",
+            "result_image": f"/{out_path}"
+        })
+    except RequestEntityTooLarge:
+        return jsonify({"error": "Image is too large. Upload an image smaller than 12 MB."}), 413
+    except Exception:
+        app.logger.exception("Road-damage image processing failed")
+        return jsonify({"error": "The server could not process this image. Try a smaller JPG or PNG, then check the service logs if it continues."}), 500
+    finally:
+        if os.path.exists(in_path):
+            os.remove(in_path)
+
+
+@app.errorhandler(413)
+def request_too_large(error):
+    if request.path == "/detect":
+        return jsonify({"error": "Image is too large. Upload an image smaller than 12 MB."}), 413
+    return error
 
 
 @app.get("/admin")

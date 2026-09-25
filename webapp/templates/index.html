@@ -129,8 +129,20 @@ detectBtn.onclick = async () => {
 
   try{
     const res = await fetch('/detect', { method:'POST', body: formData });
-    const data = await res.json();
-    if(data.error){ status.textContent = 'Error: ' + data.error; detectBtn.disabled = false; return; }
+    const responseText = await res.text();
+    let data;
+    try{
+      data = JSON.parse(responseText);
+    }catch(_){
+      const detail = responseText.trim().slice(0, 180);
+      throw new Error(detail
+        ? `Server returned HTTP ${res.status}: ${detail}`
+        : `Server returned an empty response (HTTP ${res.status}). Check the hosting service logs.`);
+    }
+    if(!res.ok || data.error){
+      status.textContent = 'Error: ' + (data.error || `Server returned HTTP ${res.status}.`);
+      return;
+    }
 
     document.getElementById('resultsPanel').style.display = 'block';
     document.getElementById('resultImg').src = data.result_image + '?t=' + Date.now();
@@ -149,8 +161,9 @@ detectBtn.onclick = async () => {
       : `Found ${data.count} damage instance(s).`;
   }catch(err){
     status.textContent = 'Request failed: ' + err;
+  }finally{
+    detectBtn.disabled = false;
   }
-  detectBtn.disabled = false;
 };
 
 // --- PWA: register service worker + handle install prompt ---
