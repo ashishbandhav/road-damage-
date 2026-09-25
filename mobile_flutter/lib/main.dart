@@ -10,16 +10,47 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
-const String SERVER_URL = "http://127.0.0.1:5000";
+const String SERVER_URL = String.fromEnvironment(
+  'SERVER_URL',
+  defaultValue: 'http://localhost:5000',
+);
 
 void main() => runApp(const RoadScanApp());
 
-class RoadScanApp extends StatelessWidget {
+class RoadScanApp extends StatefulWidget {
   const RoadScanApp({super.key});
+
+  @override
+  State<RoadScanApp> createState() => _RoadScanAppState();
+}
+
+class _RoadScanAppState extends State<RoadScanApp> {
+  String? _accessToken;
+  String? _email;
+
+  Future<void> _signOut() async {
+    final token = _accessToken;
+    if (token != null) {
+      try {
+        await http.post(
+          Uri.parse('$SERVER_URL/api/auth/logout'),
+          headers: {'Authorization': 'Bearer $token'},
+        );
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() {
+        _accessToken = null;
+        _email = null;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -39,7 +70,153 @@ class RoadScanApp extends StatelessWidget {
           titleSpacing: 20,
         ),
       ),
-      home: const DetectorScreen(),
+      home: _accessToken == null
+          ? AuthScreen(onAuthenticated: (token, email) {
+              setState(() {
+                _accessToken = token;
+                _email = email;
+              });
+            })
+          : DetectorScreen(
+              accessToken: _accessToken!,
+              email: _email!,
+              onLogout: _signOut,
+            ),
+    );
+  }
+}
+
+class AuthScreen extends StatefulWidget {
+  const AuthScreen({super.key, required this.onAuthenticated});
+
+  final void Function(String token, String email) onAuthenticated;
+
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  bool _registering = false;
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final response = await http.post(
+        Uri.parse(
+            '$SERVER_URL/api/auth/${_registering ? 'register' : 'login'}'),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Client-Platform': kIsWeb ? 'flutter-web' : 'flutter',
+        },
+        body: jsonEncode({
+          'email': _emailController.text.trim(),
+          'password': _passwordController.text,
+        }),
+      );
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        setState(
+            () => _error = data['error']?.toString() ?? 'Unable to sign in.');
+        return;
+      }
+      final user = data['user'] as Map<String, dynamic>;
+      widget.onAuthenticated(
+          data['access_token'] as String, user['email'] as String);
+    } catch (_) {
+      setState(() => _error = 'Could not reach the RoadScan server.');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Icon(Icons.change_history,
+                    color: Color(0xFFFF6A3D), size: 42),
+                const SizedBox(height: 14),
+                Text(
+                  _registering ? 'Create your account' : 'Welcome to RoadScan',
+                  style: Theme.of(context)
+                      .textTheme
+                      .headlineSmall
+                      ?.copyWith(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 22),
+                TextField(
+                  controller: _emailController,
+                  keyboardType: TextInputType.emailAddress,
+                  autofillHints: const [AutofillHints.email],
+                  decoration: const InputDecoration(
+                      labelText: 'Email', border: OutlineInputBorder()),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  controller: _passwordController,
+                  obscureText: true,
+                  autofillHints: [
+                    _registering
+                        ? AutofillHints.newPassword
+                        : AutofillHints.password
+                  ],
+                  decoration: const InputDecoration(
+                      labelText: 'Password (at least 8 characters)',
+                      border: OutlineInputBorder()),
+                  onSubmitted: (_) => _loading ? null : _submit(),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(_error!,
+                      style: const TextStyle(color: Color(0xFFE6432F))),
+                ],
+                const SizedBox(height: 18),
+                FilledButton(
+                  onPressed: _loading ? null : _submit,
+                  child: _loading
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : Text(_registering ? 'Create account' : 'Sign in'),
+                ),
+                TextButton(
+                  onPressed: _loading
+                      ? null
+                      : () => setState(() {
+                            _registering = !_registering;
+                            _error = null;
+                          }),
+                  child: Text(_registering
+                      ? 'Already registered? Sign in'
+                      : 'New here? Create an account'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -48,7 +225,8 @@ class Detection {
   final String cls;
   final double confidence;
   final String severity;
-  Detection({required this.cls, required this.confidence, required this.severity});
+  Detection(
+      {required this.cls, required this.confidence, required this.severity});
   factory Detection.fromJson(Map<String, dynamic> j) => Detection(
         cls: j['class'],
         confidence: (j['confidence'] as num).toDouble(),
@@ -57,13 +235,23 @@ class Detection {
 }
 
 class DetectorScreen extends StatefulWidget {
-  const DetectorScreen({super.key});
+  const DetectorScreen(
+      {super.key,
+      required this.accessToken,
+      required this.email,
+      required this.onLogout});
+
+  final String accessToken;
+  final String email;
+  final Future<void> Function() onLogout;
+
   @override
   State<DetectorScreen> createState() => _DetectorScreenState();
 }
 
 class _DetectorScreenState extends State<DetectorScreen> {
   File? _imageFile;
+  Uint8List? _imageBytes;
   String? _resultImageUrl;
   List<Detection> _detections = [];
   bool _loading = false;
@@ -77,7 +265,8 @@ class _DetectorScreenState extends State<DetectorScreen> {
   void initState() {
     super.initState();
     _loadUpdates();
-    _updatesTimer = Timer.periodic(const Duration(seconds: 10), (_) => _loadUpdates());
+    _updatesTimer =
+        Timer.periodic(const Duration(seconds: 10), (_) => _loadUpdates());
   }
 
   @override
@@ -88,7 +277,13 @@ class _DetectorScreenState extends State<DetectorScreen> {
 
   Future<void> _loadUpdates() async {
     try {
-      final response = await http.get(Uri.parse("$SERVER_URL/api/updates"));
+      final response = await http.get(
+        Uri.parse("$SERVER_URL/api/updates"),
+        headers: {
+          'Authorization': 'Bearer ${widget.accessToken}',
+          'X-Client-Platform': kIsWeb ? 'flutter-web' : 'flutter',
+        },
+      );
       if (response.statusCode != 200 || !mounted) return;
       final data = jsonDecode(response.body) as Map<String, dynamic>;
       setState(() {
@@ -104,8 +299,22 @@ class _DetectorScreenState extends State<DetectorScreen> {
   Future<void> _pickImage(ImageSource source) async {
     final picked = await _picker.pickImage(source: source, imageQuality: 85);
     if (picked == null) return;
+
+    if (kIsWeb) {
+      final bytes = await picked.readAsBytes();
+      setState(() {
+        _imageBytes = bytes;
+        _imageFile = null;
+        _resultImageUrl = null;
+        _detections = [];
+        _status = "";
+      });
+      return;
+    }
+
     setState(() {
       _imageFile = File(picked.path);
+      _imageBytes = null;
       _resultImageUrl = null;
       _detections = [];
       _status = "";
@@ -113,7 +322,7 @@ class _DetectorScreenState extends State<DetectorScreen> {
   }
 
   Future<void> _runDetection() async {
-    if (_imageFile == null) return;
+    if (_imageFile == null && _imageBytes == null) return;
     setState(() {
       _loading = true;
       _status = "Running detection...";
@@ -122,7 +331,23 @@ class _DetectorScreenState extends State<DetectorScreen> {
     try {
       final uri = Uri.parse("$SERVER_URL/detect");
       final request = http.MultipartRequest("POST", uri);
-      request.files.add(await http.MultipartFile.fromPath("image", _imageFile!.path));
+      request.headers['Authorization'] = 'Bearer ${widget.accessToken}';
+      request.headers['X-Client-Platform'] = kIsWeb ? 'flutter-web' : 'flutter';
+
+      if (kIsWeb) {
+        request.files.add(
+          http.MultipartFile.fromBytes(
+            'image',
+            _imageBytes!,
+            filename: 'upload.jpg',
+          ),
+        );
+      } else {
+        request.files.add(
+          await http.MultipartFile.fromPath('image', _imageFile!.path),
+        );
+      }
+
       final streamed = await request.send();
       final response = await http.Response.fromStream(streamed);
 
@@ -137,7 +362,9 @@ class _DetectorScreenState extends State<DetectorScreen> {
         return;
       }
 
-      final dets = (data['detections'] as List).map((d) => Detection.fromJson(d)).toList();
+      final dets = (data['detections'] as List)
+          .map((d) => Detection.fromJson(d))
+          .toList();
       setState(() {
         _detections = dets;
         _resultImageUrl = "$SERVER_URL${data['result_image']}";
@@ -172,9 +399,18 @@ class _DetectorScreenState extends State<DetectorScreen> {
           children: const [
             Icon(Icons.change_history, color: Color(0xFFFF6A3D), size: 20),
             SizedBox(width: 8),
-            Text("RoadScan AI", style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+            Text("RoadScan AI",
+                style:
+                    TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.2)),
           ],
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Sign out ${widget.email}',
+            onPressed: widget.onLogout,
+            icon: const Icon(Icons.logout),
+          ),
+        ],
       ),
       body: Container(
         decoration: const BoxDecoration(
@@ -249,16 +485,17 @@ class _DetectorScreenState extends State<DetectorScreen> {
                       const SizedBox(height: 18),
                       Row(
                         children: [
-                          _statusPill(Icons.bolt, "AI-powered", const Color(0xFFFFF0E6)),
+                          _statusPill(Icons.bolt, "AI-powered",
+                              const Color(0xFFFFF0E6)),
                           const SizedBox(width: 8),
-                          _statusPill(Icons.speed, "Fast scan", const Color(0xFFFFD166)),
+                          _statusPill(Icons.speed, "Fast scan",
+                              const Color(0xFFFFD166)),
                         ],
                       ),
                     ],
                   ),
                 ),
                 const SizedBox(height: 20),
-
                 GestureDetector(
                   onTap: () => _showSourceSheet(context),
                   child: Container(
@@ -266,7 +503,8 @@ class _DetectorScreenState extends State<DetectorScreen> {
                     width: double.infinity,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(24),
-                      border: Border.all(color: const Color(0xFF3B4658), width: 1.2),
+                      border: Border.all(
+                          color: const Color(0xFF3B4658), width: 1.2),
                       boxShadow: [
                         BoxShadow(
                           color: Colors.black.withOpacity(0.25),
@@ -279,48 +517,53 @@ class _DetectorScreenState extends State<DetectorScreen> {
                       borderRadius: BorderRadius.circular(24),
                       child: _resultImageUrl != null
                           ? Image.network(_resultImageUrl!, fit: BoxFit.cover)
-                          : _imageFile != null
-                              ? Image.file(_imageFile!, fit: BoxFit.cover)
-                              : Container(
-                                  decoration: const BoxDecoration(
-                                    gradient: LinearGradient(
-                                      begin: Alignment.topCenter,
-                                      end: Alignment.bottomCenter,
-                                      colors: [
-                                        Color(0xFF1E293B),
-                                        Color(0xFF111827),
-                                      ],
-                                    ),
-                                  ),
-                                  child: const Center(
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        Icon(Icons.add_a_photo_outlined,
-                                            color: Color(0xFFFF8A50), size: 48),
-                                        SizedBox(height: 12),
-                                        Text(
-                                          "Tap to add a road photo",
-                                          style: TextStyle(
-                                            fontSize: 18,
-                                            fontWeight: FontWeight.w700,
-                                            color: Colors.white,
-                                          ),
+                          : _imageBytes != null
+                              ? Image.memory(_imageBytes!, fit: BoxFit.cover)
+                              : _imageFile != null && !kIsWeb
+                                  ? Image.file(_imageFile!, fit: BoxFit.cover)
+                                  : Container(
+                                      decoration: const BoxDecoration(
+                                        gradient: LinearGradient(
+                                          begin: Alignment.topCenter,
+                                          end: Alignment.bottomCenter,
+                                          colors: [
+                                            Color(0xFF1E293B),
+                                            Color(0xFF111827),
+                                          ],
                                         ),
-                                        SizedBox(height: 6),
-                                        Text(
-                                          "Camera or gallery",
-                                          style: TextStyle(color: Colors.grey, fontSize: 13),
+                                      ),
+                                      child: const Center(
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: [
+                                            Icon(Icons.add_a_photo_outlined,
+                                                color: Color(0xFFFF8A50),
+                                                size: 48),
+                                            SizedBox(height: 12),
+                                            Text(
+                                              "Tap to add a road photo",
+                                              style: TextStyle(
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.w700,
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                            SizedBox(height: 6),
+                                            Text(
+                                              "Camera or gallery",
+                                              style: TextStyle(
+                                                  color: Colors.grey,
+                                                  fontSize: 13),
+                                            ),
+                                          ],
                                         ),
-                                      ],
+                                      ),
                                     ),
-                                  ),
-                                ),
                     ),
                   ),
                 ),
                 const SizedBox(height: 18),
-
                 Container(
                   width: double.infinity,
                   decoration: BoxDecoration(
@@ -342,31 +585,38 @@ class _DetectorScreenState extends State<DetectorScreen> {
                     ],
                   ),
                   child: ElevatedButton(
-                    onPressed: (_imageFile == null || _loading) ? null : _runDetection,
+                    onPressed: ((_imageFile == null && _imageBytes == null) ||
+                            _loading)
+                        ? null
+                        : _runDetection,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.transparent,
                       foregroundColor: Colors.white,
                       shadowColor: Colors.transparent,
                       padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(18)),
                     ),
                     child: _loading
                         ? const SizedBox(
                             height: 20,
                             width: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white),
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2.5, color: Colors.white),
                           )
                         : const Text(
                             "RUN DETECTION",
-                            style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                            style: TextStyle(
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.2),
                           ),
                   ),
                 ),
-
                 if (_status.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 10),
                     decoration: BoxDecoration(
                       color: const Color(0xFF1F2937).withOpacity(0.8),
                       borderRadius: BorderRadius.circular(12),
@@ -374,16 +624,19 @@ class _DetectorScreenState extends State<DetectorScreen> {
                     ),
                     child: Text(
                       _status,
-                      style: const TextStyle(color: Color(0xFFE5E7EB), fontSize: 13),
+                      style: const TextStyle(
+                          color: Color(0xFFE5E7EB), fontSize: 13),
                     ),
                   ),
                 ],
-
                 if (_detections.isNotEmpty) ...[
                   const SizedBox(height: 20),
                   const Text(
                     "Results",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Colors.white),
+                    style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: Colors.white),
                   ),
                   const SizedBox(height: 10),
                   ..._detections.map((d) => Container(
@@ -394,12 +647,14 @@ class _DetectorScreenState extends State<DetectorScreen> {
                           border: Border.all(color: const Color(0xFF374151)),
                         ),
                         child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 16, vertical: 6),
                           leading: Container(
                             width: 42,
                             height: 42,
                             decoration: BoxDecoration(
-                              color: _severityColor(d.severity).withOpacity(0.18),
+                              color:
+                                  _severityColor(d.severity).withOpacity(0.18),
                               borderRadius: BorderRadius.circular(12),
                             ),
                             child: Icon(
@@ -429,9 +684,8 @@ class _DetectorScreenState extends State<DetectorScreen> {
                         ),
                       )),
                 ],
-
-                        const SizedBox(height: 22),
-                        _buildLiveUpdates(),
+                const SizedBox(height: 22),
+                _buildLiveUpdates(),
               ],
             ),
           ),
@@ -455,7 +709,8 @@ class _DetectorScreenState extends State<DetectorScreen> {
           const SizedBox(width: 6),
           Text(
             label,
-            style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w700),
+            style: TextStyle(
+                color: color, fontSize: 12, fontWeight: FontWeight.w700),
           ),
         ],
       ),
@@ -481,19 +736,26 @@ class _DetectorScreenState extends State<DetectorScreen> {
               const Expanded(
                 child: Text(
                   "Live safety updates",
-                  style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800),
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w800),
                 ),
               ),
               Text(
                 "LIVE",
-                style: TextStyle(color: const Color(0xFF5FBF8F), fontSize: 11, fontWeight: FontWeight.w800),
+                style: TextStyle(
+                    color: const Color(0xFF5FBF8F),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800),
               ),
             ],
           ),
           const SizedBox(height: 6),
           const Text(
             "New pothole and emergency hazards appear here after scans.",
-            style: TextStyle(color: Color(0xFF94A3B8), fontSize: 12, height: 1.4),
+            style:
+                TextStyle(color: Color(0xFF94A3B8), fontSize: 12, height: 1.4),
           ),
           const SizedBox(height: 12),
           if (_updates.isEmpty)
@@ -504,7 +766,8 @@ class _DetectorScreenState extends State<DetectorScreen> {
           else
             ..._updates.take(5).map((update) {
               final urgent = update['urgent'] == true;
-              final color = urgent ? const Color(0xFFE6432F) : const Color(0xFFF5B400);
+              final color =
+                  urgent ? const Color(0xFFE6432F) : const Color(0xFFF5B400);
               return Container(
                 margin: const EdgeInsets.only(bottom: 8),
                 padding: const EdgeInsets.all(12),
@@ -516,7 +779,8 @@ class _DetectorScreenState extends State<DetectorScreen> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(urgent ? Icons.emergency : Icons.warning_amber_rounded, color: color, size: 20),
+                    Icon(urgent ? Icons.emergency : Icons.warning_amber_rounded,
+                        color: color, size: 20),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Column(
@@ -524,10 +788,15 @@ class _DetectorScreenState extends State<DetectorScreen> {
                         children: [
                           Text(
                             "${urgent ? 'EMERGENCY' : update['severity']} · ${update['class']}",
-                            style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800),
+                            style: TextStyle(
+                                color: color,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800),
                           ),
                           const SizedBox(height: 3),
-                          Text(update['message'] ?? 'Road damage reported.', style: const TextStyle(color: Colors.white, fontSize: 12)),
+                          Text(update['message'] ?? 'Road damage reported.',
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 12)),
                         ],
                       ),
                     ),
@@ -562,16 +831,20 @@ class _DetectorScreenState extends State<DetectorScreen> {
               ),
             ),
             ListTile(
-              leading: const Icon(Icons.camera_alt_outlined, color: Color(0xFFFF8A50)),
-              title: const Text("Take a photo", style: TextStyle(color: Colors.white)),
+              leading: const Icon(Icons.camera_alt_outlined,
+                  color: Color(0xFFFF8A50)),
+              title: const Text("Take a photo",
+                  style: TextStyle(color: Colors.white)),
               onTap: () {
                 Navigator.pop(ctx);
                 _pickImage(ImageSource.camera);
               },
             ),
             ListTile(
-              leading: const Icon(Icons.photo_library_outlined, color: Color(0xFFFF8A50)),
-              title: const Text("Choose from gallery", style: TextStyle(color: Colors.white)),
+              leading: const Icon(Icons.photo_library_outlined,
+                  color: Color(0xFFFF8A50)),
+              title: const Text("Choose from gallery",
+                  style: TextStyle(color: Colors.white)),
               onTap: () {
                 Navigator.pop(ctx);
                 _pickImage(ImageSource.gallery);

@@ -35,10 +35,19 @@ Open the deployed site on a phone browser (`/app`):
 ```bash
 cd webapp
 pip install -r requirements.txt
-# copy your downloaded best.pt into this webapp/ folder
 python app.py
 ```
-Open http://localhost:5000 — upload a road photo, see detections with severity (Low/Medium/High based on bounding box size).
+On first startup, the app downloads the YOLOv8 road-damage checkpoint from `nsr51324/Road_Damage_Object_Detection` on Hugging Face. An internet connection is needed for that initial download. To use a local compatible checkpoint instead, set `MODEL_PATH` before starting Flask. Open http://localhost:5000 and upload a road photo to see detected damage with confidence and severity.
+
+The selected model card reports YOLOv8 mAP50 of 0.394 and mAP50-95 of 0.230. Treat detections as an inspection aid: this lightweight checkpoint can miss damage or produce false positives and is not a substitute for professional road-safety assessment.
+
+### User accounts and admin activity
+- The detector requires an account. Users can register from `/login`; new registrations always receive the `user` role.
+- Configure `ADMIN_EMAIL` and `ADMIN_PASSWORD` before the first server start to create the administrator account. This account can review accounts and recent login, detector, dataset, and accident-data activity at `/admin`. Admin accounts cannot be created from the public registration form.
+- Set `SECRET_KEY` to a long, random value and keep it stable across restarts. Set `SESSION_COOKIE_SECURE=true` when serving over HTTPS.
+- SQLite is stored at `webapp/data/roadscan.sqlite3` by default. Set `DATABASE_PATH` to a persistent volume path when deploying to a host with an ephemeral filesystem; otherwise account and audit data can be lost on redeploy.
+- The audit log records timestamps, account email, action, client label, IP address, browser/device user-agent, and detection count/classes/mode. It does not store uploaded image contents. Restrict access to the database and admin account because IP and device details are personal data.
+- The Flutter app uses the same accounts and API. Set its `SERVER_URL` to the deployed server URL when building/running it. Mobile API tokens expire after 30 days; the app asks the user to sign in again after it is closed.
 
 ### Step 3 (optional) — "Real life" deployment
 - Deploy Flask app to Render/Railway/PythonAnywhere (free tiers) for a live URL to include in your submission.

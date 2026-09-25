@@ -1,5 +1,6 @@
 flask
 ultralytics
+huggingface_hub
 opencv-python
 kagglehub[pandas-datasets]
 gunicorn

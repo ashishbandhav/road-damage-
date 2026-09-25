@@ -2,24 +2,200 @@
 Road Damage Detection - Flask Web App
 Run: python app.py
 Requires: ultralytics, flask, opencv-python
-Put your trained model as 'best.pt' in this folder (from the Colab notebook).
+Downloads the default road-damage checkpoint from Hugging Face on first startup.
+Set MODEL_PATH to use a local compatible checkpoint instead.
 """
-from flask import Flask, request, render_template, jsonify, send_from_directory, abort
-from ultralytics import YOLO
+from flask import Flask, request, render_template, jsonify, send_from_directory, abort, session, g, redirect, url_for
+
+try:
+    from ultralytics import YOLO
+except (ImportError, OSError):
+    YOLO = None
+try:
+    from huggingface_hub import hf_hub_download
+except ImportError:
+    hf_hub_download = None
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+from contextlib import contextmanager
+import hashlib, json, secrets, sqlite3
 from werkzeug.utils import secure_filename
+from werkzeug.security import check_password_hash, generate_password_hash
 import csv, os, uuid, cv2
 import xml.etree.ElementTree as ET
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY") or secrets.token_hex(32)
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "").lower() == "true",
+)
 UPLOAD_DIR = "static/uploads"
 RESULT_DIR = "static/results"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)
+DATABASE_PATH = os.getenv(
+    "DATABASE_PATH", os.path.join(os.path.dirname(__file__), "data", "roadscan.sqlite3")
+)
+os.makedirs(os.path.dirname(os.path.abspath(DATABASE_PATH)), exist_ok=True)
 
-MODEL_PATH = "best.pt"  # replace with your trained weights
-model = YOLO(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
+
+@contextmanager
+def database():
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def initialize_database():
+    with database() as connection:
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS access_tokens (
+                token_hash TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                expires_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                email TEXT,
+                action TEXT NOT NULL,
+                details TEXT NOT NULL DEFAULT '{}',
+                client TEXT NOT NULL,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TEXT NOT NULL
+            );
+        """)
+        admin_email = os.getenv("ADMIN_EMAIL", "").strip().lower()
+        admin_password = os.getenv("ADMIN_PASSWORD", "")
+        if admin_email and admin_password:
+            connection.execute(
+                "INSERT OR IGNORE INTO users (email, password_hash, role, created_at) VALUES (?, ?, 'admin', ?)",
+                (admin_email, generate_password_hash(admin_password), datetime.now(timezone.utc).isoformat()),
+            )
+
+
+def record_activity(user, action, details=None):
+    with database() as connection:
+        connection.execute(
+            "INSERT INTO activity_logs (user_id, email, action, details, client, ip_address, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                user["id"] if user else None,
+                user["email"] if user else None,
+                action,
+                json.dumps(details or {}, separators=(",", ":")),
+                request.headers.get("X-Client-Platform", "web")[:40],
+                request.remote_addr,
+                request.user_agent.string[:300],
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+
+def issue_access_token(user_id):
+    token = secrets.token_urlsafe(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    with database() as connection:
+        connection.execute(
+            "INSERT INTO access_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+            (hashlib.sha256(token.encode()).hexdigest(), user_id, expires_at),
+        )
+    return token
+
+
+@app.before_request
+def load_authenticated_user():
+    g.user = None
+    user_id = session.get("user_id")
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        token_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
+        with database() as connection:
+            row = connection.execute(
+                "SELECT users.* FROM access_tokens JOIN users ON users.id = access_tokens.user_id WHERE token_hash = ? AND expires_at > ?",
+                (token_hash, datetime.now(timezone.utc).isoformat()),
+            ).fetchone()
+        if row:
+            g.user = row
+            return
+    if user_id:
+        with database() as connection:
+            g.user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        if g.user is None:
+            session.clear()
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if g.user is None:
+            if request.path.startswith("/api/") or request.is_json:
+                return jsonify({"error": "Authentication required"}), 401
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def admin_required(view):
+    @wraps(view)
+    @login_required
+    def wrapped(*args, **kwargs):
+        if g.user["role"] != "admin":
+            if request.path.startswith("/api/") or request.is_json:
+                return jsonify({"error": "Administrator access required"}), 403
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+
+initialize_database()
+
+MODEL_REPO = "nsr51324/Road_Damage_Object_Detection"
+MODEL_FILENAME = "runs/detect/yolov8_road/weights/best.pt"
+MODEL_PATH = os.getenv("MODEL_PATH", "")
+
+
+def load_detection_model():
+    if YOLO is None:
+        app.logger.warning("Ultralytics is unavailable; detection is disabled.")
+        return None
+    if MODEL_PATH:
+        weights_path = MODEL_PATH
+    elif hf_hub_download is not None:
+        try:
+            weights_path = hf_hub_download(
+                repo_id=MODEL_REPO,
+                filename=MODEL_FILENAME,
+            )
+        except Exception:
+            app.logger.exception("Could not download the configured road-damage model.")
+            return None
+    else:
+        app.logger.error("huggingface_hub is unavailable; detection is disabled.")
+        return None
+    try:
+        app.logger.info("Loading road-damage model weights from %s", weights_path)
+        return YOLO(weights_path)
+    except Exception:
+        app.logger.exception("Could not load the road-damage model weights.")
+        return None
+
+
+model = load_detection_model()
 INCIDENT_UPDATES = deque(maxlen=30)
 ACCIDENTS_CSV_PATH = os.getenv(
     "ACCIDENTS_CSV_PATH",
@@ -153,23 +329,140 @@ def kaggle_annotation_detections(filename, width, height):
     return detections
 
 
+def create_user(email, password):
+    email = email.strip().lower()
+    if not email or len(email) > 254 or "@" not in email:
+        return None, "Enter a valid email address."
+    if len(password) < 8:
+        return None, "Password must be at least 8 characters."
+    try:
+        with database() as connection:
+            cursor = connection.execute(
+                "INSERT INTO users (email, password_hash, role, created_at) VALUES (?, ?, 'user', ?)",
+                (email, generate_password_hash(password), datetime.now(timezone.utc).isoformat()),
+            )
+            return connection.execute("SELECT * FROM users WHERE id = ?", (cursor.lastrowid,)).fetchone(), None
+    except sqlite3.IntegrityError:
+        return None, "An account with that email already exists."
+
+
+def auth_response(user, token):
+    return jsonify({
+        "access_token": token,
+        "user": {"email": user["email"], "role": user["role"]},
+    })
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if g.user:
+        return redirect(url_for("admin_dashboard" if g.user["role"] == "admin" else "index"))
+    error = None
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        with database() as connection:
+            user = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        if user and check_password_hash(user["password_hash"], password):
+            session.clear()
+            session["user_id"] = user["id"]
+            record_activity(user, "login")
+            return redirect(url_for("admin_dashboard" if user["role"] == "admin" else "index"))
+        record_activity(None, "login_failed", {"email": email})
+        error = "Email or password is incorrect."
+    return render_template("auth.html", mode="login", error=error)
+
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if g.user:
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        user, error = create_user(request.form.get("email", ""), request.form.get("password", ""))
+        if user:
+            session.clear()
+            session["user_id"] = user["id"]
+            record_activity(user, "account_created")
+            return redirect(url_for("index"))
+    return render_template("auth.html", mode="register", error=error)
+
+
+@app.post("/logout")
+@login_required
+def logout():
+    record_activity(g.user, "logout")
+    session.clear()
+    return redirect(url_for("home"))
+
+
+@app.post("/api/auth/register")
+def api_register():
+    data = request.get_json(silent=True) or {}
+    user, error = create_user(str(data.get("email", "")), str(data.get("password", "")))
+    if error:
+        return jsonify({"error": error}), 400
+    token = issue_access_token(user["id"])
+    record_activity(user, "account_created")
+    return auth_response(user, token), 201
+
+
+@app.post("/api/auth/login")
+def api_login():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()
+    password = str(data.get("password", ""))
+    with database() as connection:
+        user = connection.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    if not user or not check_password_hash(user["password_hash"], password):
+        record_activity(None, "login_failed", {"email": email})
+        return jsonify({"error": "Email or password is incorrect."}), 401
+    token = issue_access_token(user["id"])
+    record_activity(user, "login")
+    return auth_response(user, token)
+
+
+@app.post("/api/auth/logout")
+@login_required
+def api_logout():
+    record_activity(g.user, "logout")
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        token_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
+        with database() as connection:
+            connection.execute("DELETE FROM access_tokens WHERE token_hash = ?", (token_hash,))
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auth/me")
+@login_required
+def api_current_user():
+    return jsonify({"user": {"email": g.user["email"], "role": g.user["role"]}})
+
+
 @app.route("/")
 def home():
     return render_template("landing.html")
 
 
 @app.route("/app")
+@login_required
 def index():
-    return render_template("index.html")
+    record_activity(g.user, "detector_opened")
+    return render_template("index.html", detector_ready=model is not None)
 
 
 @app.route("/api/updates")
+@login_required
 def updates():
     return jsonify({"updates": list(INCIDENT_UPDATES)})
 
 
 @app.route("/api/accidents")
+@login_required
 def accidents():
+    record_activity(g.user, "accident_data_viewed")
     data = read_accident_data()
     if "error" in data:
         return jsonify(data), 404
@@ -177,7 +470,9 @@ def accidents():
 
 
 @app.route("/api/kaggle-dataset")
+@login_required
 def kaggle_dataset():
+    record_activity(g.user, "sample_dataset_viewed")
     root, files, _ = kaggle_image_files()
     if not root:
         return jsonify({"error": "Kaggle dataset is unavailable. Run kagglehub setup first."}), 503
@@ -193,6 +488,7 @@ def kaggle_dataset():
 
 
 @app.route("/kaggle-image/<split>/<filename>")
+@login_required
 def kaggle_image(split, filename):
     if split != "train" or os.path.basename(filename) != filename:
         abort(404)
@@ -203,6 +499,7 @@ def kaggle_image(split, filename):
 
 
 @app.route("/detect", methods=["POST"])
+@login_required
 def detect():
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
@@ -255,6 +552,11 @@ def detect():
     out_path = os.path.join(RESULT_DIR, out_name)
     cv2.imwrite(out_path, img)
     add_incident_updates(detections)
+    record_activity(g.user, "detection_completed", {
+        "count": len(detections),
+        "classes": sorted({item["class"] for item in detections}),
+        "mode": detection_mode,
+    })
 
     return jsonify({
         "detections": detections,
@@ -263,6 +565,24 @@ def detect():
         "message": "Exact Kaggle XML annotations used." if detection_mode == "kaggle_annotations" else "No trained model is installed; no pothole size was fabricated." if detection_mode == "no_model" else "YOLO model detections used.",
         "result_image": f"/{out_path}"
     })
+
+
+@app.get("/admin")
+@admin_required
+def admin_dashboard():
+    with database() as connection:
+        users = connection.execute(
+            "SELECT users.email, users.role, users.created_at, "
+            "MAX(CASE WHEN activity_logs.action = 'login' THEN activity_logs.created_at END) AS last_login, "
+            "SUM(CASE WHEN activity_logs.action = 'detection_completed' THEN 1 ELSE 0 END) AS detections "
+            "FROM users LEFT JOIN activity_logs ON activity_logs.user_id = users.id "
+            "GROUP BY users.id ORDER BY users.created_at DESC"
+        ).fetchall()
+        events = connection.execute(
+            "SELECT email, action, details, client, ip_address, user_agent, created_at "
+            "FROM activity_logs ORDER BY id DESC LIMIT 500"
+        ).fetchall()
+    return render_template("admin.html", users=users, events=events)
 
 
 if __name__ == "__main__":

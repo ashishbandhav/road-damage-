@@ -23,12 +23,17 @@
   .logo{display:flex;align-items:center;gap:10px;color:var(--text);text-decoration:none;}
   .logo-mark{width:26px;height:26px;background:var(--cone);clip-path:polygon(50% 0%,0% 100%,100% 100%);}
   .logo-text{font-family:'Barlow Condensed';font-weight:800;font-size:1.2rem;letter-spacing:.05em;text-transform:uppercase;}
-  header a.back{color:var(--muted);text-decoration:none;font-size:.85rem;}
-  header a.back:hover{color:var(--text);}
+  .header-actions{display:flex;align-items:center;gap:16px;color:var(--muted);font-size:.82rem;}
+  .header-actions a{color:var(--muted);text-decoration:none;}
+  .header-actions a:hover{color:var(--text);}
+  .header-actions button{background:transparent;color:var(--text);border:1px solid var(--border);padding:7px 10px;border-radius:4px;cursor:pointer;}
+  .header-actions button:hover{border-color:var(--cone);}
   header p{margin:4px 0 0;color:var(--muted);font-size:.9rem}
   .wrap{max-width:1000px;margin:40px auto;padding:0 20px;}
   h2.page-title{font-family:'Barlow Condensed';font-size:2.2rem;text-transform:uppercase;font-weight:800;margin-bottom:6px;}
   .subtitle{color:var(--muted);margin-bottom:28px;font-size:.95rem;}
+  .model-notice{padding:12px 14px;margin:-12px 0 20px;border-left:3px solid var(--caution);background:#29261d;color:#f2e6c8;font-size:.88rem;line-height:1.5;}
+  .model-notice strong{color:var(--caution);}
   .panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:24px;margin-bottom:24px;}
   .dropzone{border:2px dashed var(--border);border-radius:6px;padding:40px;text-align:center;cursor:pointer;transition:.2s;}
   .dropzone:hover{border-color:var(--cone);}
@@ -56,7 +61,11 @@
 <div class="marking-strip"></div>
 <header>
   <a class="logo" href="/" aria-label="RoadScan AI home"><div class="logo-mark"></div><span class="logo-text">RoadScan AI</span></a>
-  <a href="/" class="back">← Back to site</a>
+  <div class="header-actions">
+    <span>{{ g.user['email'] }}</span>
+    {% if g.user['role'] == 'admin' %}<a href="/admin">Admin activity</a>{% endif %}
+    <form method="post" action="/logout"><button type="submit">Sign out</button></form>
+  </div>
 </header>
 
 <div class="wrap">
@@ -66,6 +75,7 @@
   </div>
   <h2 class="page-title">Damage Detector</h2>
   <p class="subtitle">Upload a road photo — the model marks cracks and potholes with a severity score.</p>
+  {% if not detector_ready %}<div class="model-notice" role="status"><strong>Road-damage model is unavailable.</strong> The app could not load the requested Hugging Face checkpoint. Check the server connection or set <code>MODEL_PATH</code> to a local compatible weights file, then restart.</div>{% endif %}
   <div class="panel">
     <div class="dropzone" id="dropzone">
       <p>Drag & drop a road image here, or click to select</p>
@@ -128,13 +138,15 @@ detectBtn.onclick = async () => {
     const body = document.getElementById('resultsBody');
     body.innerHTML = '';
     if(data.count === 0){
-      body.innerHTML = '<tr><td colspan="3">No damage detected.</td></tr>';
+      body.innerHTML = `<tr><td colspan="3">${data.message || 'No damage detected.'}</td></tr>`;
     } else {
       data.detections.forEach(d => {
         body.innerHTML += `<tr><td>${d.class}</td><td>${(d.confidence*100).toFixed(0)}%</td><td class="sev-${d.severity}">${d.severity}</td></tr>`;
       });
     }
-    status.textContent = `Found ${data.count} damage instance(s).`;
+    status.textContent = data.count === 0 && data.mode === 'no_model'
+      ? 'Detection unavailable: trained model not installed.'
+      : `Found ${data.count} damage instance(s).`;
   }catch(err){
     status.textContent = 'Request failed: ' + err;
   }
