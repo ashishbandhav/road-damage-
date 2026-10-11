@@ -11,15 +11,6 @@
   - `requirements.txt`
 - `mobile_flutter/` — a real native Android/iOS app project (Flutter) that calls the same Flask API. See `mobile_flutter/README.md` to build an actual `.apk`/`.ipa`.
 
-## Two ways to get a "mobile app"
-
-**A. PWA (fastest, no app store, works today)**
-Open the deployed site on a phone browser (`/app`):
-- **Android/Chrome:** an "Install" banner appears automatically — tap it, the app installs to the home screen with its own icon, runs full-screen.
-- **iOS/Safari:** tap Share → "Add to Home Screen" (a banner in-app reminds you). No App Store needed.
-
-**B. Native Flutter app (real .apk/.ipa for submission)**
-`mobile_flutter/` is a buildable Flutter project — camera/gallery picker, calls your Flask `/detect` endpoint, shows the same severity-scored results. Requires Flutter SDK installed locally (this sandbox can't compile mobile binaries). Follow `mobile_flutter/README.md`.
 
 ## How to run end-to-end
 
